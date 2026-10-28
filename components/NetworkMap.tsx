@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Entity = { id: string; name: string; type: string; role?: string; country?: string; profile?: string; x?: number; y?: number };
+type Entity = { id: string; name: string; type: string; role?: string; country?: string; profile?: string; x?: number; y?: number; spots?: number; days?: number };
+type LiveFeed = { date: string | null; points: { lat: number; lng: number; frp: number }[] };
 type Rel = { a: string; b: string; rel: string; ctx?: string };
 type Data = { entities: Entity[]; rels: Rel[]; sources?: { id: string; title: string; pub: string; url: string }[]; built?: string; tracked?: { usd: number; parts?: { label: string; usd: number }[] } };
 
@@ -21,18 +22,27 @@ const LINK: Record<string, string> = {
 const MODES = ["network", "owns", "supplies", "money", "concession", "fire", "notice", "opposes"];
 
 // ---- stylized ASEAN fire map (schematic shapes, real province counts) ----
-type Prov = { name: string; lng: number; lat: number; spots: number; note: string };
+type Month = "all" | "aug" | "sep" | "oct";
+// Greenpeace 2026 season: 6,811 haze source points 8 Aug–1 Oct; 980 inside 233 oil-palm concessions
+const SEASON_TOTAL = 6811;
+const IN_CONCESSION = 980;
+type Prov = { name: string; lng: number; lat: number; spots: number; aug: number; sep: number; oct: number; note: string };
 const PROVS: Prov[] = [
-  { name: "Central Kalimantan", lng: 113.5, lat: -1.8, spots: 1728, note: "Worst province. ~47Mt CO₂e, above 2015/2019 levels." },
-  { name: "South Papua", lng: 140.3, lat: -7.5, spots: 1413, note: "Merauke food estate frontier; 807 hotspots in WALHI study." },
-  { name: "West Kalimantan", lng: 110.5, lat: 0.2, spots: 1240, note: "~31.4Mt CO₂e, above 2015/2019 levels." },
-  { name: "South Sumatra", lng: 104, lat: -3.5, spots: 953, note: "~20.6Mt CO₂e. Ogan Komering Ilir worst regency (639)." },
-  { name: "South Kalimantan", lng: 115, lat: -3, spots: 404, note: "Banjar + Kotabaru worst regencies." },
-  { name: "East Kalimantan", lng: 116.5, lat: 0.5, spots: 249, note: "Paser worst regency (125)." },
-  { name: "Maluku", lng: 128.5, lat: -3.5, spots: 152, note: "Buru worst regency (50)." },
-  { name: "Jambi", lng: 103.3, lat: -1.8, spots: 137, note: "Tanjung Jabung Timur worst (50)." },
-  { name: "Riau", lng: 102, lat: 0.5, spots: 45, note: "Lowest monitored; Indragiri Hilir worst (19)." },
+  { name: "Central Kalimantan", lng: 113.5, lat: -1.8, spots: 1728, aug: 456, sep: 1214, oct: 58, note: "Worst province. ~47Mt CO₂e, above 2015/2019 levels." },
+  { name: "South Papua", lng: 140.3, lat: -7.5, spots: 1413, aug: 450, sep: 960, oct: 3, note: "Merauke food estate frontier; 807 hotspots in WALHI study." },
+  { name: "West Kalimantan", lng: 110.5, lat: 0.2, spots: 1240, aug: 597, sep: 641, oct: 2, note: "~31.4Mt CO₂e, above 2015/2019 levels." },
+  { name: "South Sumatra", lng: 104, lat: -3.5, spots: 953, aug: 102, sep: 795, oct: 90, note: "~20.6Mt CO₂e. Ogan Komering Ilir worst regency (639)." },
+  { name: "South Kalimantan", lng: 115, lat: -3, spots: 404, aug: 122, sep: 271, oct: 11, note: "Banjar + Kotabaru worst regencies." },
+  { name: "East Kalimantan", lng: 116.5, lat: 0.5, spots: 249, aug: 0, sep: 246, oct: 3, note: "Paser worst regency (125)." },
+  { name: "Maluku", lng: 128.5, lat: -3.5, spots: 152, aug: 0, sep: 138, oct: 14, note: "Buru worst regency (50)." },
+  { name: "Jambi", lng: 103.3, lat: -1.8, spots: 137, aug: 11, sep: 92, oct: 0, note: "Tanjung Jabung Timur worst (50)." },
+  { name: "West Papua", lng: 133, lat: -3, spots: 131, aug: 0, sep: 106, oct: 25, note: "Fak Fak + Kaimana worst regencies." },
+  { name: "Bangka Belitung", lng: 106, lat: -2.5, spots: 108, aug: 0, sep: 105, oct: 3, note: "Bangka Selatan worst (75)." },
+  { name: "Lampung", lng: 105.3, lat: -5, spots: 73, aug: 4, sep: 55, oct: 14, note: "Mesuji + Lampung Timur worst." },
+  { name: "Riau", lng: 102, lat: 0.5, spots: 45, aug: 15, sep: 30, oct: 0, note: "Lowest monitored; Indragiri Hilir worst (19)." },
 ];
+const spotsOf = (p: Prov, m: Month) => m === "all" ? p.spots : p[m];
+const MONTH_LABEL: Record<Month, string> = { all: "ALL", aug: "AUG", sep: "SEP", oct: "OCT" };
 // real ASEAN coastlines load from /asean.geojson (Natural Earth, world.geo.json)
 const HAZE_HIT = [
   { name: "Singapore", lng: 103.8, lat: 1.35, label: "SG · haze 5d" },
@@ -53,18 +63,66 @@ function haloText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
 function mulberry(seed: number) {
   return () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
 }
-const DOTS: { lng: number; lat: number; hot: boolean }[] = (() => {
-  const out: { lng: number; lat: number; hot: boolean }[] = [];
+// stable jittered dot pools per province (140 max); month slices take a prefix
+const DOTS: { lng: number; lat: number; hot: boolean; pi: number }[] = (() => {
+  const out: { lng: number; lat: number; hot: boolean; pi: number }[] = [];
   PROVS.forEach((p, pi) => {
     const rnd = mulberry(1000 + pi);
-    const n = Math.min(140, Math.round(p.spots / 12));
-    for (let i = 0; i < n; i++) {
-      out.push({ lng: p.lng + (rnd() - 0.5) * 1.8, lat: p.lat + (rnd() - 0.5) * 1.4, hot: p.spots > 500 });
+    for (let i = 0; i < 140; i++) {
+      out.push({ lng: p.lng + (rnd() - 0.5) * 1.8, lat: p.lat + (rnd() - 0.5) * 1.4, hot: p.spots > 500, pi });
     }
   });
   return out;
 })();
+const dotsFor = (m: Month) => {
+  const want = PROVS.map((p) => Math.min(140, Math.round(spotsOf(p, m) / 12)));
+  const seen = new Array(PROVS.length).fill(0);
+  return DOTS.filter((d) => seen[d.pi]++ < want[d.pi]);
+};
+// slippy-map tile helpers (Web Mercator; near-equator ≈ equirectangular)
+const lng2x = (lng: number, z: number) => ((lng + 180) / 360) * (1 << z);
+const lat2y = (lat: number, z: number) => {
+  const r = (lat * Math.PI) / 180;
+  return ((1 - Math.log(Math.tan(r) + 1 / Math.cos(r)) / Math.PI) / 2) * (1 << z);
+};
+const x2lng = (x: number, z: number) => (x / (1 << z)) * 360 - 180;
+const y2lat = (y: number, z: number) => {
+  const n = Math.PI - (2 * Math.PI * y) / (1 << z);
+  return (180 / Math.PI) * Math.atan(0.5 * (Math.exp(n) - Math.exp(-n)));
+};
 type Faces = number[][][][];
+// coarse land mask (0.25° grid) built from coastline polys; kills sea dots + gas flares
+type LandMask = { grid: Uint8Array; cols: number; rows: number };
+function buildMask(faces: Faces): LandMask {
+  const cols = 192, rows = 96;
+  const grid = new Uint8Array(cols * rows);
+  const feats = faces.map((poly) => {
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const ring of poly) for (const [lng, lat] of ring) {
+      if (lng < x0) x0 = lng; if (lng > x1) x1 = lng;
+      if (lat < y0) y0 = lat; if (lat > y1) y1 = lat;
+    }
+    return { poly, x0, x1, y0, y1 };
+  });
+  const inside = (lng: number, lat: number) => {
+    for (const f of feats) {
+      if (lng < f.x0 || lng > f.x1 || lat < f.y0 || lat > f.y1) continue;
+      for (const ring of f.poly) {
+        let xi = ring[0][0], yi = ring[0][1], odd = false;
+        for (let i = 1; i <= ring.length; i++) {
+          const xj = ring[i % ring.length][0], yj = ring[i % ring.length][1];
+          if (yi !== yj && (lat < yi) !== (lat < yj) && lng < ((xj - xi) * (lat - yi)) / (yj - yi) + xi) odd = !odd;
+          xi = xj; yi = yj;
+        }
+        if (odd) return true;
+      }
+    }
+    return false;
+  };
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++)
+    grid[r * cols + c] = inside(94 + (c + 0.5) * 0.25, 12 - (r + 0.5) * 0.25) ? 1 : 0;
+  return { grid, cols, rows };
+}
 
 function money(u: number) {
   return u >= 1e9 ? "$" + (u / 1e9).toFixed(2) + "B" : u >= 1e6 ? "$" + (u / 1e6).toFixed(1) + "M" : "$" + u;
@@ -81,6 +139,22 @@ export default function NetworkMap() {
   const [view, setView] = useState<"net" | "map">("net");
   const [prov, setProv] = useState<string | null>(null);
   const [geo, setGeo] = useState<Faces | null>(null);
+  const [month, setMonth] = useState<Month>("all");
+  const tileCache = useRef(new Map<string, HTMLImageElement>());
+  const maskRef = useRef<LandMask | null>(null);
+  const inLand = (lng: number, lat: number) => {
+    const m = maskRef.current;
+    if (!m) return true;
+    const c = Math.floor((lng - 94) / 0.25), r = Math.floor((12 - lat) / 0.25);
+    if (c < 0 || r < 0 || c >= m.cols || r >= m.rows) return false;
+    return m.grid[r * m.cols + c] === 1;
+  };
+  const [live, setLive] = useState<LiveFeed | null>(null);
+  useEffect(() => {
+    fetch("/api/firms").then((r) => r.json()).then((j) => {
+      if (j.live && Array.isArray(j.points) && j.points.length) setLive({ date: j.date, points: j.points.slice(0, 3000) });
+    }).catch(() => {});
+  }, []);
   useEffect(() => {
     fetch("/asean.geojson").then((r) => r.json()).then((g: { features: { geometry?: { type: string; coordinates: number[] } }[] }) => {
       const faces: Faces = [];
@@ -90,7 +164,9 @@ export default function NetworkMap() {
         if (t === "Polygon") faces.push(c as number[][][]);
         else if (t === "MultiPolygon") for (const p of c as number[][][][]) faces.push(p);
       }
-      setGeo(faces.filter((p) => p.length));
+      const kept = faces.filter((p) => p.length);
+      setGeo(kept);
+      maskRef.current = buildMask(kept);
     }).catch(() => {});
   }, []);
   const st = useRef({ nodes: [] as Node[], edges: [] as Edge[], cam: { x: 0, y: 0, z: 1 }, ticks: 0, theta: 0, dragging: false, sim: true, deg: {} as Record<string, number>, parts: [] as { e: Edge; t: number }[] });
@@ -264,49 +340,143 @@ export default function NetworkMap() {
         const [X, Y] = proj(lng, lat);
         return [(X - c.x) * c.z + w / 2, (Y - c.y) * c.z + h / 2];
       };
-      // graticule
-      ctx.strokeStyle = "#141414"; ctx.lineWidth = 1;
-      for (let lng = 95; lng <= 140; lng += 5) {
-        const [ax, ay] = P(lng, 12), [bx, by] = P(lng, -12);
-        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-      }
-      for (let lat = -10; lat <= 10; lat += 5) {
-        const [ax, ay] = P(94, lat), [bx, by] = P(142, lat);
-        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
-      }
-      // real coastlines
-      if (geo) {
-        for (const poly of geo) {
-          for (const ring of poly) {
-            ctx.beginPath();
-            ring.forEach(([lng, lat], i) => { const [sx, sy] = P(lng, lat); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
-            ctx.closePath();
+      // OSM tiles darkened in-canvas, viewport-limited; vector/graticule only as offline fallback
+      let tilesDrawn = false;
+      {
+        const base = projectMaker(w, h);
+        const [X0] = base(94, 0);
+        const s0 = base(95, 0)[0] - X0;
+        const s = s0 * c.z;
+        let zt = Math.round(Math.log2(Math.max(1, (s * 360) / 256)));
+        zt = Math.max(2, Math.min(9, zt));
+        const toLng = (sx: number) => ((sx - w / 2) / c.z + c.x) / s0 + 118;
+        const toLat = (sy: number) => 0 - ((sy - h / 2) / c.z + c.y) / s0;
+        const pad = 256 / (s * 1);
+        const x0 = Math.floor(lng2x(toLng(-pad), zt)), x1 = Math.floor(lng2x(toLng(w + pad), zt));
+        const y0 = Math.floor(lat2y(toLat(-pad), zt)), y1 = Math.floor(lat2y(toLat(h + pad), zt));
+        const canFilter = typeof ctx.filter === "string";
+        if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 64) {
+          for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
+            const key = `${zt}/${x}/${y}`;
+            let img = tileCache.current.get(key);
+            if (!img) {
+              img = new Image();
+              img.crossOrigin = "anonymous";
+              img.src = `https://${"abc".charAt(((x + y) % 3 + 3) % 3)}.tile.openstreetmap.org/${zt}/${x}/${y}.png`;
+              img.onload = () => drawRef.current();
+              tileCache.current.set(key, img);
+              continue;
+            }
+            if (!img.complete || !img.naturalWidth) continue;
+            const corner = (lng: number, lat: number): [number, number] => {
+              const [X, Y] = base(lng, lat);
+              return [(X - c.x) * c.z + w / 2, (Y - c.y) * c.z + h / 2];
+            };
+            const [tax, tay] = corner(x2lng(x, zt), y2lat(y, zt));
+            const [tbx, tby] = corner(x2lng(x + 1, zt), y2lat(y + 1, zt));
+            tilesDrawn = true;
+            if (canFilter) {
+              ctx.save();
+              ctx.filter = "grayscale(1) invert(0.92) brightness(0.85)";
+              ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
+              ctx.restore();
+            } else {
+              const dark = tileCache.current.get(key + "#d") as unknown as HTMLCanvasElement | undefined;
+              if (dark) {
+                ctx.drawImage(dark, tax, tay, tbx - tax, tby - tay);
+              } else {
+                try {
+                  const off = document.createElement("canvas");
+                  off.width = img.naturalWidth; off.height = img.naturalHeight;
+                  const octx = off.getContext("2d");
+                  if (!octx) throw new Error("no-2d");
+                  octx.drawImage(img, 0, 0);
+                  const id = octx.getImageData(0, 0, off.width, off.height);
+                  const px = id.data;
+                  for (let i = 0; i < px.length; i += 4) {
+                    px[i] = 255 - px[i]; px[i + 1] = 255 - px[i + 1]; px[i + 2] = 255 - px[i + 2];
+                    const g = (px[i] * 0.3 + px[i + 1] * 0.5 + px[i + 2] * 0.2) * 0.85;
+                    px[i] = g; px[i + 1] = g; px[i + 2] = g;
+                  }
+                  octx.putImageData(id, 0, 0);
+                  tileCache.current.set(key + "#d", off as unknown as HTMLImageElement);
+                } catch { /* tainted canvas: draw raw below */ }
+                ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
+              }
+            }
           }
-          ctx.fillStyle = "#0e100f"; ctx.fill();
-          ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
+          ctx.font = "9px IBM Plex Mono, monospace";
+          if (tilesDrawn) haloText(ctx, "© OPENSTREETMAP CONTRIBUTORS", w - 208, h - 12, "#5c5c5a");
         }
-        // Singapore missing from dataset — dot island
-        const [gx, gy] = P(103.8, 1.3);
-        ctx.fillStyle = "#0e100f";
-        ctx.fillRect(gx - 3, gy - 2, 6, 4);
-        ctx.strokeStyle = "#333";
-        ctx.strokeRect(gx - 3, gy - 2, 6, 4);
       }
-      // fire dots, additive glow
+      // offline fallback: graticule + vector coastlines only when no tiles drew
+      if (!tilesDrawn) {
+        ctx.strokeStyle = "#141414"; ctx.lineWidth = 1;
+        for (let lng = 95; lng <= 140; lng += 5) {
+          const [ax, ay] = P(lng, 12), [bx, by] = P(lng, -12);
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+        }
+        for (let lat = -10; lat <= 10; lat += 5) {
+          const [ax, ay] = P(94, lat), [bx, by] = P(142, lat);
+          ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
+        }
+        if (geo) {
+          for (const poly of geo) {
+            for (const ring of poly) {
+              ctx.beginPath();
+              ring.forEach(([lng, lat], i) => { const [sx, sy] = P(lng, lat); if (i) ctx.lineTo(sx, sy); else ctx.moveTo(sx, sy); });
+              ctx.closePath();
+            }
+            ctx.fillStyle = "#0e100f"; ctx.fill();
+            ctx.strokeStyle = "#333"; ctx.lineWidth = 1; ctx.stroke();
+          }
+          const [gx, gy] = P(103.8, 1.3);
+          ctx.fillStyle = "#0e100f";
+          ctx.fillRect(gx - 3, gy - 2, 6, 4);
+          ctx.strokeStyle = "#333";
+          ctx.strokeRect(gx - 3, gy - 2, 6, 4);
+        }
+      }
+      // live FIRMS dots (FRP-coded) replace season dots when feed is up
+      const livePts = live?.points || [];
       ctx.globalCompositeOperation = "lighter";
-      for (const d of DOTS) {
-        const [sx, sy] = P(d.lng, d.lat);
-        if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-        ctx.globalAlpha = d.hot ? 0.14 : 0.09;
-        ctx.fillStyle = "#ff3b30";
-        ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 7 : 5, 0, 7); ctx.fill();
-      }
-      for (const d of DOTS) {
-        const [sx, sy] = P(d.lng, d.lat);
-        if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-        ctx.globalAlpha = d.hot ? 0.9 : 0.55;
-        ctx.fillStyle = d.hot ? "#ff6a3d" : "#ff3b30";
-        ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 2 : 1.5, 0, 7); ctx.fill();
+      if (livePts.length) {
+        for (const q of livePts) {
+          if (!inLand(q.lng, q.lat)) continue;
+          const [sx, sy] = P(q.lng, q.lat);
+          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
+          const vs = q.frp >= 40;
+          ctx.globalAlpha = vs ? 0.2 : 0.12;
+          ctx.fillStyle = "#ff6a3d";
+          ctx.beginPath(); ctx.arc(sx, sy, vs ? 7 : 5, 0, 7); ctx.fill();
+        }
+        for (const q of livePts) {
+          if (!inLand(q.lng, q.lat)) continue;
+          const [sx, sy] = P(q.lng, q.lat);
+          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
+          const vs = q.frp >= 40;
+          ctx.globalAlpha = vs ? 0.95 : 0.6;
+          ctx.fillStyle = vs ? "#ff6a3d" : "#ffc93c";
+          ctx.beginPath(); ctx.arc(sx, sy, vs ? 2.2 : 1.6, 0, 7); ctx.fill();
+        }
+      } else {
+        const dots = dotsFor(month);
+        for (const d of dots) {
+          if (!inLand(d.lng, d.lat)) continue;
+          const [sx, sy] = P(d.lng, d.lat);
+          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
+          ctx.globalAlpha = d.hot ? 0.14 : 0.09;
+          ctx.fillStyle = "#ff3b30";
+          ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 7 : 5, 0, 7); ctx.fill();
+        }
+        for (const d of dots) {
+          if (!inLand(d.lng, d.lat)) continue;
+          const [sx, sy] = P(d.lng, d.lat);
+          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
+          ctx.globalAlpha = d.hot ? 0.9 : 0.55;
+          ctx.fillStyle = d.hot ? "#ff6a3d" : "#ff3b30";
+          ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 2 : 1.5, 0, 7); ctx.fill();
+        }
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
@@ -314,8 +484,9 @@ export default function NetworkMap() {
       for (const p of PROVS) {
         const [sx, sy] = P(p.lng, p.lat);
         if (sx < 0 || sy < 0 || sx > w || sy > h) continue;
-        if (p.spots < 400 && prov !== p.name) continue;
-        haloText(ctx, `${p.name.toUpperCase()} · ${p.spots}`, sx + 9, sy - 7, prov === p.name ? "#fff" : "#bdbdb9");
+        const ms = spotsOf(p, month);
+        if (month === "all" ? (p.spots < 400 && prov !== p.name) : (ms === 0 && prov !== p.name)) continue;
+        haloText(ctx, `${p.name.toUpperCase()} · ${ms}`, sx + 9, sy - 7, prov === p.name ? "#fff" : "#bdbdb9");
       }
       if (prov) {
         const p = PROVS.find((x) => x.name === prov);
@@ -377,7 +548,7 @@ export default function NetworkMap() {
     addEventListener("resize", onR);
     return () => { dead = true; cancelAnimationFrame(raf); removeEventListener("resize", onR); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, selId, mode, typeOff, linkOff, view, prov, geo]);
+  }, [data, selId, mode, typeOff, linkOff, view, prov, geo, month, live]);
 
   // pan / zoom / click
   useEffect(() => {
@@ -497,44 +668,50 @@ export default function NetworkMap() {
       <aside id="dossier">
         {view === "map" && (() => {
           const p = PROVS.find((x) => x.name === prov);
-          const jumps: [string, string][] = [["CON-BMH", "Bumi Mekar Hijau · 213"], ["CON-MEKAR", "Mekar Karya Kahuripan · 52"], ["CON-DAMAI", "Damai Agro Sejahtera · 48"], ["CON-MAYAWANA", "Mayawana Persada · 26"], ["CON-MENTENG", "Menteng (KLK) · 19"]];
           const go = (id: string) => { setView("net"); setProv(null); setSelId(id); };
+          const ranked = S.nodes.filter((n) => n.type === "Concession" && (n.spots || 0) > 0).sort((a, b) => (b.spots || 0) - (a.spots || 0)).slice(0, 8);
+          const namedTable = (
+            <div className="sec"><h4>NAMED HOTSPOTS · CONCESSIONS →</h4>
+              <table className="mx">
+                <thead><tr><th>Concession</th><th className="r">Spots</th><th className="r">Days</th></tr></thead>
+                <tbody>
+                  {ranked.map((n) => (
+                    <tr key={n.id} onClick={() => go(n.id)} style={{ cursor: "pointer" }}>
+                      <td className="co">{n.name}</td><td className="r mono">{n.spots}</td><td className="r mono">{n.days}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="prose" style={{ fontSize: 11 }}>Spots = haze source points 8 Aug–1 Oct 2026. Click row opens network.</div>
+            </div>
+          );
           if (!p) return (
             <>
-              <div className="tiny">Fire Map · stylized ASEAN · Greenpeace Aug–Oct 2026</div>
+              <div className="tiny">Fire Map · Greenpeace Aug–Oct 2026{live?.points.length ? ` · ● LIVE FIRMS ${live.date || ""}` : ""}</div>
               <h1>Who&apos;s profiting from the sawit haze?</h1>
-              <p className="prose">6,811 haze source points. 980 inside oil-palm concessions. Click a province for detail. Crosses mark haze-hit cities.</p>
-              <div className="sec"><h4>TRACK RECORD</h4>
-                <div className="prose" style={{ fontSize: 12 }}>· 2,719 spots re-burned on 2015–2023 scars — same landscapes, same managers.</div>
-                <div className="prose" style={{ fontSize: 12 }}>· 97–99% of burned peat never restored; 54% converted to monoculture.</div>
+              <p className="prose">{live?.points.length ? `${live.points.length.toLocaleString()} live heat signals, latest FIRMS pass ${live.date || ""} (NASA VIIRS). Orange = very strong, yellow = strong.` : `${PROVS.reduce((a, pp) => a + spotsOf(pp, month), 0).toLocaleString()} haze source points in ${MONTH_LABEL[month]}.`} {IN_CONCESSION.toLocaleString()} inside oil-palm concessions (full season, Greenpeace). Click a province for detail.</p>
+              <div className="stat3">
+                <div><b>{live?.points.length ? live.points.length.toLocaleString() : "6,811"}</b><span className="tiny">{live?.points.length ? "SIGNALS LATEST PASS" : "SPOTS SEASON"}</span></div>
+                <div><b>{S.edges.filter((e) => e.rel === "fire").length}</b><span className="tiny">CONCESSIONS HIT</span></div>
+                <div><b>{Math.round((IN_CONCESSION / SEASON_TOTAL) * 100)}%</b><span className="tiny">SPOTS IN CONCESSIONS</span></div>
               </div>
-              <div className="sec"><h4>WORST CONCESSIONS →</h4>
-                {jumps.map(([id, label]) => (
-                  <button key={id} className="rel" onClick={() => go(id)}>
-                    <span style={{ color: "#ff8c00" }}>●</span><span className="who">{label}</span>
-                    <span className="mono" style={{ fontSize: 10 }}>→</span>
-                    <span className="what">open in network</span>
-                  </button>
-                ))}
+              {namedTable}
+              <div className="sec"><h4>SEASON CONTEXT</h4>
+                <div className="prose" style={{ fontSize: 12 }}>· Peak month September; El Niño drought turned drained peat to tinder. Fires peak July–October, worst in September.</div>
+                <div className="prose" style={{ fontSize: 12 }}>· The danger is the peat: drained for plantations it smoulders underground for months. Sumatra + Kalimantan hold the world&apos;s largest tropical peatlands.</div>
+                <div className="prose" style={{ fontSize: 12 }}>· Track record: 2,719 spots re-burned on 2015–2023 scars; 2015 burned ~2.6M ha; 2019 ~1.6M ha. 97–99% of burned peat never restored.</div>
+                <div className="prose" style={{ fontSize: 12 }}>· Season dots: Greenpeace haze sources. Live dots: NASA FIRMS VIIRS (very strong FRP ≥ 40). One fire gives several signals.</div>
               </div>
             </>
           );
           return (
             <>
-              <div className="tiny">Fire Map · province</div>
+              <div className="tiny">Fire Map · province · {MONTH_LABEL[month]}</div>
               <h1>{p.name}</h1>
-              <div className="big" style={{ color: "#ff3b30" }}>{p.spots.toLocaleString()}</div>
-              <p className="prose">haze source spots, 8 Aug–1 Oct 2026.</p>
+              <div className="big" style={{ color: "#ff3b30" }}>{spotsOf(p, month).toLocaleString()}</div>
+              <p className="prose">haze source spots{month === "all" ? ", 8 Aug–1 Oct 2026" : month === "oct" ? ", 1 Oct 2026 (monitoring ends 1 Oct)" : " in " + MONTH_LABEL[month] + " 2026"}.</p>
               <div className="kv"><dt>NOTE</dt><dd className="prose">{p.note}</dd></div>
-              <div className="sec"><h4>WORST CONCESSIONS →</h4>
-                {jumps.map(([id, label]) => (
-                  <button key={id} className="rel" onClick={() => go(id)}>
-                    <span style={{ color: "#ff8c00" }}>●</span><span className="who">{label}</span>
-                    <span className="mono" style={{ fontSize: 10 }}>→</span>
-                    <span className="what">open in network</span>
-                  </button>
-                ))}
-              </div>
+              {namedTable}
             </>
           );
         })()}
@@ -614,15 +791,25 @@ export default function NetworkMap() {
         <button onClick={() => { st.current.cam = { x: 0, y: 0, z: 1 }; setSelId(null); drawRef.current(); }}>⟲</button>
       </div>
       <div id="modes">
-        {MODES.map((m) => (
-          <button key={m} data-m={m} aria-pressed={mode === m} onClick={() => setMode(m)}>
-            {m.toUpperCase()}
-          </button>
-        ))}
+        {view === "map"
+          ? ((["all", "aug", "sep", "oct"] as Month[]).map((m) => (
+            <button key={m} aria-pressed={month === m} onClick={() => setMonth(m)}>
+              {MONTH_LABEL[m]}
+            </button>
+          )))
+          : (MODES.map((m) => (
+            <button key={m} data-m={m} aria-pressed={mode === m} onClick={() => setMode(m)}>
+              {m.toUpperCase()}
+            </button>
+          )))}
       </div>
       <div id="crumbs">
         {view === "map"
-          ? (prov ? `${prov.toUpperCase()} · ${PROVS.find((p) => p.name === prov)?.spots} SPOTS` : "Fire Map · 6,811 SPOTS · 9 PROVINCES")
+          ? (() => {
+            const tot = PROVS.reduce((a, p) => a + spotsOf(p, month), 0);
+            const pp = PROVS.find((p) => p.name === prov);
+            return prov && pp ? `${prov.toUpperCase()} · ${spotsOf(pp, month)} SPOTS · ${MONTH_LABEL[month]}` : `Fire Map · ${tot.toLocaleString()} SPOTS · ${MONTH_LABEL[month]} · ${PROVS.length} PROVINCES`;
+          })()
           : (sel ? <><button onClick={() => setSelId(null)}>← ALL</button> {` ${sel.name} · ${sel.type}`}</>
             : `${S.nodes.filter(visible).length} ENTITIES · ${S.edges.filter(visibleE).length} LINKS`)}
       </div>
