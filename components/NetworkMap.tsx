@@ -22,7 +22,7 @@ const LINK: Record<string, string> = {
 const MODES = ["network", "owns", "supplies", "money", "concession", "fire", "notice", "opposes"];
 
 // ---- stylized ASEAN fire map (schematic shapes, real province counts) ----
-type Month = "all" | "aug" | "sep" | "oct";
+type Month = "all" | "aug" | "sep"; // season = Aug-Sep archive; October lives on ● LIVE
 // Greenpeace 2026 season: 6,811 haze source points 8 Aug–1 Oct; 980 inside 233 oil-palm concessions
 const SEASON_TOTAL = 6811;
 const IN_CONCESSION = 980;
@@ -42,7 +42,7 @@ const PROVS: Prov[] = [
   { name: "Riau", lng: 102, lat: 0.5, spots: 45, aug: 15, sep: 30, oct: 0, note: "Lowest monitored; Indragiri Hilir worst (19)." },
 ];
 const spotsOf = (p: Prov, m: Month) => m === "all" ? p.spots : p[m];
-const MONTH_LABEL: Record<Month, string> = { all: "ALL", aug: "AUG", sep: "SEP", oct: "OCT" };
+const MONTH_LABEL: Record<Month, string> = { all: "ALL", aug: "AUG", sep: "SEP" };
 // real ASEAN coastlines load from /asean.geojson (Natural Earth, world.geo.json)
 const HAZE_HIT = [
   { name: "Singapore", lng: 103.8, lat: 1.35, label: "SG · haze 5d" },
@@ -60,25 +60,7 @@ function haloText(ctx: CanvasRenderingContext2D, text: string, x: number, y: num
   ctx.fillStyle = color;
   ctx.fillText(text, x, y);
 }
-function mulberry(seed: number) {
-  return () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
-}
-// stable jittered dot pools per province (140 max); month slices take a prefix
-const DOTS: { lng: number; lat: number; hot: boolean; pi: number }[] = (() => {
-  const out: { lng: number; lat: number; hot: boolean; pi: number }[] = [];
-  PROVS.forEach((p, pi) => {
-    const rnd = mulberry(1000 + pi);
-    for (let i = 0; i < 140; i++) {
-      out.push({ lng: p.lng + (rnd() - 0.5) * 1.8, lat: p.lat + (rnd() - 0.5) * 1.4, hot: p.spots > 500, pi });
-    }
-  });
-  return out;
-})();
-const dotsFor = (m: Month) => {
-  const want = PROVS.map((p) => Math.min(140, Math.round(spotsOf(p, m) / 12)));
-  const seen = new Array(PROVS.length).fill(0);
-  return DOTS.filter((d) => seen[d.pi]++ < want[d.pi]);
-};
+
 // slippy-map tile helpers (Web Mercator; near-equator ≈ equirectangular)
 const lng2x = (lng: number, z: number) => ((lng + 180) / 360) * (1 << z);
 const lat2y = (lat: number, z: number) => {
@@ -137,7 +119,7 @@ export default function NetworkMap() {
   const [linkOff, setLinkOff] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"net" | "map" | "index">("net");
-  const [prov, setProv] = useState<string | null>(null);
+
   const [geo, setGeo] = useState<Faces | null>(null);
   const [month, setMonth] = useState<Month>("all");
   const tileCache = useRef(new Map<string, HTMLImageElement>());
@@ -150,10 +132,31 @@ export default function NetworkMap() {
     return m.grid[r * m.cols + c] === 1;
   };
   const [live, setLive] = useState<LiveFeed | null>(null);
+  const [seasonPts, setSeasonPts] = useState<{ lat: number; lng: number; frp: number; d: string }[]>([]);
+  const [seasonErr, setSeasonErr] = useState(false);
+  const [feed, setFeed] = useState<"season" | "live">("season"); // season = Aug-Sep archive; live = latest quiet pass
+  // dot size + color from fire intensity (FRP); bands match legend
+  const frpR = (frp: number) => Math.min(9, 1.3 + Math.sqrt(Math.max(0, frp)) * 0.32);
+  const frpC = (frp: number) => (frp >= 40 ? "#ff3b30" : frp >= 10 ? "#ff6a3d" : "#ffc93c");
   useEffect(() => {
-    fetch("/api/firms").then((r) => r.json()).then((j) => {
+      fetch("/api/firms").then((r) => r.json()).then((j) => {
       if (j.live && Array.isArray(j.points) && j.points.length) setLive({ date: j.date, points: j.points.slice(0, 3000) });
     }).catch(() => {});
+      // pre-baked static archive first (instant), live API as fallback
+      const gotSeason = (j: { season?: boolean; points?: unknown[] }) => {
+        if (j.season && Array.isArray(j.points) && j.points.length) {
+          setSeasonPts(j.points as { lat: number; lng: number; frp: number; d: string }[]);
+          return true;
+        }
+        return false;
+      };
+      fetch("/season.json").then((r) => r.json()).then((j) => {
+        if (!gotSeason(j)) throw new Error("empty static");
+      }).catch(() => {
+        fetch("/api/firms?season=1").then((r) => r.json()).then((j) => {
+          if (!gotSeason(j)) setSeasonErr(true);
+        }).catch(() => setSeasonErr(true));
+      });
   }, []);
   useEffect(() => {
     fetch("/asean.geojson").then((r) => r.json()).then((g: { features: { geometry?: { type: string; coordinates: number[] } }[] }) => {
@@ -169,6 +172,11 @@ export default function NetworkMap() {
       maskRef.current = buildMask(kept);
     }).catch(() => {});
   }, []);
+  // default framing: centered slightly east (Sulawesi side) so Sumatra isn't half-cropped
+  const mapHome = () => {
+    const [X] = projectMaker(innerWidth, innerHeight)(124, 0);
+    return { x: X, y: 0, z: 0.65 };
+  };
   const st = useRef({ nodes: [] as Node[], edges: [] as Edge[], cam: { x: 0, y: 0, z: 1 }, ticks: 0, theta: 0, dragging: false, sim: true, deg: {} as Record<string, number>, parts: [] as { e: Edge; t: number }[] });
   const nodeR = (n: Node) => 4.5 + Math.min(7, Math.sqrt(st.current.deg[n.id] || 1) * 1.9);
   const quadAt = (a: number[], c: number[], b: number[], t: number): [number, number] => {
@@ -360,7 +368,6 @@ export default function NetworkMap() {
         const pad = 256 / (s * 1);
         const x0 = Math.floor(lng2x(toLng(-pad), zt)), x1 = Math.floor(lng2x(toLng(w + pad), zt));
         const y0 = Math.floor(lat2y(toLat(-pad), zt)), y1 = Math.floor(lat2y(toLat(h + pad), zt));
-        const canFilter = typeof ctx.filter === "string";
         if ((x1 - x0 + 1) * (y1 - y0 + 1) <= 64) {
           for (let x = x0; x <= x1; x++) for (let y = y0; y <= y1; y++) {
             const key = `${zt}/${x}/${y}`;
@@ -368,53 +375,23 @@ export default function NetworkMap() {
             if (!img) {
               img = new Image();
               img.crossOrigin = "anonymous";
-              img.src = `https://${"abc".charAt(((x + y) % 3 + 3) % 3)}.tile.openstreetmap.org/${zt}/${x}/${y}.png`;
+              img.src = `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Dark_Gray_Base/MapServer/tile/${zt}/${y}/${x}`;
               img.onload = () => drawRef.current();
               tileCache.current.set(key, img);
               continue;
             }
             if (!img.complete || !img.naturalWidth) continue;
+            tilesDrawn = true;
             const corner = (lng: number, lat: number): [number, number] => {
               const [X, Y] = base(lng, lat);
               return [(X - c.x) * c.z + w / 2, (Y - c.y) * c.z + h / 2];
             };
             const [tax, tay] = corner(x2lng(x, zt), y2lat(y, zt));
             const [tbx, tby] = corner(x2lng(x + 1, zt), y2lat(y + 1, zt));
-            tilesDrawn = true;
-            if (canFilter) {
-              ctx.save();
-              ctx.filter = "grayscale(1) invert(0.92) brightness(0.85)";
-              ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
-              ctx.restore();
-            } else {
-              // SAFETY: "#d" keys are only ever set with the canvas built below; Map type just can't express mixed values.
-              const dark = tileCache.current.get(key + "#d") as unknown as HTMLCanvasElement | undefined;
-              if (dark) {
-                ctx.drawImage(dark, tax, tay, tbx - tax, tby - tay);
-              } else {
-                try {
-                  const off = document.createElement("canvas");
-                  off.width = img.naturalWidth; off.height = img.naturalHeight;
-                  const octx = off.getContext("2d");
-                  if (!octx) throw new Error("no-2d");
-                  octx.drawImage(img, 0, 0);
-                  const id = octx.getImageData(0, 0, off.width, off.height);
-                  const px = id.data;
-                  for (let i = 0; i < px.length; i += 4) {
-                    px[i] = 255 - px[i]; px[i + 1] = 255 - px[i + 1]; px[i + 2] = 255 - px[i + 2];
-                    const g = (px[i] * 0.3 + px[i + 1] * 0.5 + px[i + 2] * 0.2) * 0.85;
-                    px[i] = g; px[i + 1] = g; px[i + 2] = g;
-                  }
-                  octx.putImageData(id, 0, 0);
-                  // SAFETY: canvas stored under "#d" key, read back only as canvas (see above).
-                  tileCache.current.set(key + "#d", off as unknown as HTMLImageElement);
-                } catch { /* tainted canvas: draw raw below */ }
-                ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
-              }
-            }
+            ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
           }
           ctx.font = "9px IBM Plex Mono, monospace";
-          if (tilesDrawn) haloText(ctx, "© OPENSTREETMAP CONTRIBUTORS", w - 208, h - 12, "#5c5c5a");
+          if (tilesDrawn) haloText(ctx, "ESRI · HERE · GARMIN · © OPENSTREETMAP CONTRIBUTORS", w - 268, h - 12, "#5c5c5a");
         }
       }
       // offline fallback: graticule + vector coastlines only when no tiles drew
@@ -445,46 +422,33 @@ export default function NetworkMap() {
           ctx.strokeRect(gx - 3, gy - 2, 6, 4);
         }
       }
-      // live FIRMS dots (FRP-coded) replace season dots when feed is up
+      // real FIRMS positions, size + color by intensity; season archive preferred, live latest pass, jittered fallback
+      const mOf = (d: string) => (d.slice(5, 7) === "09" ? "sep" : "aug"); // baked archive is Aug-Sep only
       const livePts = live?.points || [];
+      // no fake dots: status text while the archive loads or fails
+      if (feed === "season" && !seasonPts.length) {
+        ctx.font = "11px IBM Plex Mono, monospace";
+        haloText(ctx, seasonErr ? "SEASON ARCHIVE UNREACHABLE — RETRY LATER" : "FETCHING SEASON ARCHIVE…", w / 2 - 120, h / 2, "#bdbdb9");
+      }
+      const pts: { lng: number; lat: number; frp: number }[] = (feed === "live" && livePts.length)
+        ? livePts
+        : seasonPts.filter((q) => month === "all" || mOf(q.d) === month);
       ctx.globalCompositeOperation = "lighter";
-      if (livePts.length) {
-        for (const q of livePts) {
-          if (!inLand(q.lng, q.lat)) continue;
-          const [sx, sy] = P(q.lng, q.lat);
-          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-          const vs = q.frp >= 40;
-          ctx.globalAlpha = vs ? 0.2 : 0.12;
-          ctx.fillStyle = "#ff6a3d";
-          ctx.beginPath(); ctx.arc(sx, sy, vs ? 7 : 5, 0, 7); ctx.fill();
-        }
-        for (const q of livePts) {
-          if (!inLand(q.lng, q.lat)) continue;
-          const [sx, sy] = P(q.lng, q.lat);
-          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-          const vs = q.frp >= 40;
-          ctx.globalAlpha = vs ? 0.95 : 0.6;
-          ctx.fillStyle = vs ? "#ff6a3d" : "#ffc93c";
-          ctx.beginPath(); ctx.arc(sx, sy, vs ? 2.2 : 1.6, 0, 7); ctx.fill();
-        }
-      } else {
-        const dots = dotsFor(month);
-        for (const d of dots) {
-          if (!inLand(d.lng, d.lat)) continue;
-          const [sx, sy] = P(d.lng, d.lat);
-          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-          ctx.globalAlpha = d.hot ? 0.14 : 0.09;
-          ctx.fillStyle = "#ff3b30";
-          ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 7 : 5, 0, 7); ctx.fill();
-        }
-        for (const d of dots) {
-          if (!inLand(d.lng, d.lat)) continue;
-          const [sx, sy] = P(d.lng, d.lat);
-          if (sx < -10 || sy < -10 || sx > w + 10 || sy > h + 10) continue;
-          ctx.globalAlpha = d.hot ? 0.9 : 0.55;
-          ctx.fillStyle = d.hot ? "#ff6a3d" : "#ff3b30";
-          ctx.beginPath(); ctx.arc(sx, sy, d.hot ? 2 : 1.5, 0, 7); ctx.fill();
-        }
+      for (const q of pts) {
+        if (!inLand(q.lng, q.lat)) continue;
+        const [sx, sy] = P(q.lng, q.lat);
+        if (sx < -16 || sy < -16 || sx > w + 16 || sy > h + 16) continue;
+        ctx.globalAlpha = 0.13;
+        ctx.fillStyle = frpC(q.frp);
+        ctx.beginPath(); ctx.arc(sx, sy, frpR(q.frp) * 2.2, 0, 7); ctx.fill();
+      }
+      for (const q of pts) {
+        if (!inLand(q.lng, q.lat)) continue;
+        const [sx, sy] = P(q.lng, q.lat);
+        if (sx < -16 || sy < -16 || sx > w + 16 || sy > h + 16) continue;
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = frpC(q.frp);
+        ctx.beginPath(); ctx.arc(sx, sy, frpR(q.frp), 0, 7); ctx.fill();
       }
       ctx.globalAlpha = 1;
       ctx.globalCompositeOperation = "source-over";
@@ -493,17 +457,8 @@ export default function NetworkMap() {
         const [sx, sy] = P(p.lng, p.lat);
         if (sx < 0 || sy < 0 || sx > w || sy > h) continue;
         const ms = spotsOf(p, month);
-        if (month === "all" ? (p.spots < 400 && prov !== p.name) : (ms === 0 && prov !== p.name)) continue;
-        haloText(ctx, `${p.name.toUpperCase()} · ${ms}`, sx + 9, sy - 7, prov === p.name ? "#fff" : "#bdbdb9");
-      }
-      if (prov) {
-        const p = PROVS.find((x) => x.name === prov);
-        if (p) {
-          const [sx, sy] = P(p.lng, p.lat);
-          ctx.strokeStyle = "#fff"; ctx.setLineDash([4, 3]);
-          ctx.beginPath(); ctx.arc(sx, sy, 16, 0, 7); ctx.stroke();
-          ctx.setLineDash([]);
-        }
+        if (month === "all" ? p.spots < 400 : ms === 0) continue;
+        haloText(ctx, p.name.toUpperCase(), sx + 9, sy - 7, "#bdbdb9");
       }
       for (const m of HAZE_HIT) {
         const [sx, sy] = P(m.lng, m.lat);
@@ -512,7 +467,7 @@ export default function NetworkMap() {
         haloText(ctx, m.label.toUpperCase(), sx + 7, sy + 3, "#7dd3fc");
       }
       if (w > 760) {
-        haloText(ctx, "● FIRE CLUSTER (~12 SPOTS/DOT)", w - 218, 96, "#ff6a3d");
+        haloText(ctx, "● VIIRS DETECTION · SIZE = INTENSITY", w - 228, 96, "#ff6a3d");
         haloText(ctx, "+ HAZE-HIT CITY", w - 218, 110, "#7dd3fc");
       }
     };
@@ -561,7 +516,7 @@ export default function NetworkMap() {
     addEventListener("resize", onR);
     return () => { dead = true; cancelAnimationFrame(raf); removeEventListener("resize", onR); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [data, selId, mode, typeOff, linkOff, view, prov, geo, month, live]);
+  }, [data, selId, mode, typeOff, linkOff, view, geo, month, live, seasonPts, seasonErr, feed]);
 
   // pan / zoom / click
   useEffect(() => {
@@ -574,29 +529,18 @@ export default function NetworkMap() {
       if (!drag) return;
       st.current.cam.x = drag.cx - (e.clientX - drag.x) / st.current.cam.z;
       st.current.cam.y = drag.cy - (e.clientY - drag.y) / st.current.cam.z;
+      if (view === "map") clampMapCam(innerWidth, innerHeight);
       drawRef.current();
     };
     const wheel = (e: WheelEvent) => {
       e.preventDefault();
-      st.current.cam.z = Math.min(4, Math.max(0.3, st.current.cam.z * (e.deltaY < 0 ? 1.12 : 0.89)));
+      st.current.cam.z = Math.min(4, st.current.cam.z * (e.deltaY < 0 ? 1.12 : 0.89));
+      if (view === "map") clampMapCam(innerWidth, innerHeight);
       drawRef.current();
     };
     const click = (e: MouseEvent) => {
       const w = innerWidth, h = innerHeight;
-      if (view === "map") {
-        const c = st.current.cam;
-        const proj = projectMaker(w, h);
-        let bp: Prov | null = null, bd = 34;
-        for (const p of PROVS) {
-          const [X, Y] = proj(p.lng, p.lat);
-          const sx = (X - c.x) * c.z + w / 2, sy = (Y - c.y) * c.z + h / 2;
-          const d = Math.hypot(sx - e.clientX, sy - e.clientY);
-          if (d < bd) { bd = d; bp = p; }
-        }
-        setProv(bp ? bp.name : null);
-        drawRef.current();
-        return;
-      }
+
       let best: Node | null = null, bd = 16;
       for (const n of st.current.nodes) {
         if (!visible(n)) continue;
@@ -630,6 +574,23 @@ export default function NetworkMap() {
   const types = [...new Set(S.nodes.map((n) => n.type))];
   const links = [...new Set(S.edges.map((e) => e.rel))];
   const hits = query.trim() ? S.nodes.filter((n) => n.name.toLowerCase().includes(query.toLowerCase())).slice(0, 12) : [];
+  // ASEAN-only: never zoom out past the regional fit, never pan past its edges
+  const clampMapCam = (w: number, h: number) => {
+    const c = st.current.cam;
+    const s = Math.max(1, Math.min((w - 120) / 48, (h - 140) / 24));
+    if (c.z < 0.65) c.z = 0.65;
+    const hw = w / 2 / c.z, hh = h / 2 / c.z, m = 40 / c.z;
+    const X0 = (94 - 118) * s, X1 = (142 - 118) * s;
+    const Y0 = (0 - 12) * s, Y1 = (0 + 12) * s;
+    const CX = (X0 + X1) / 2, CY = (Y0 + Y1) / 2, RX = (X1 - X0) / 2, RY = (Y1 - Y0) / 2;
+    // wide viewport: allow drift until the region nears the screen edge; narrow: classic clamp
+    c.x = hw >= RX
+      ? Math.min(Math.max(c.x, CX - (hw - RX) - m), CX + (hw - RX) + m)
+      : Math.min(Math.max(c.x, X0 + hw - m), X1 - hw + m);
+    c.y = hh >= RY
+      ? Math.min(Math.max(c.y, CY - (hh - RY) - m), CY + (hh - RY) + m)
+      : Math.min(Math.max(c.y, Y0 + hh - m), Y1 - hh + m);
+  };
   const toggle = (set: Set<string>, v: string, apply: (n: Set<string>) => void) => {
     const n = new Set(set);
     if (n.has(v)) n.delete(v); else n.add(v);
@@ -655,9 +616,9 @@ export default function NetworkMap() {
           )}
         </div>
         <nav className="top">
-          <button aria-pressed={view === "net"} onClick={() => { setView("net"); setProv(null); }}>NETWORK</button>
-          <button aria-pressed={view === "map"} onClick={() => { setView("map"); setSelId(null); }}>FIRE MAP</button>
-          <button aria-pressed={view === "index"} onClick={() => { setView("index"); setSelId(null); setProv(null); }}>INDEX</button>
+          <button aria-pressed={view === "net"} onClick={() => setView("net")}>NETWORK</button>
+          <button aria-pressed={view === "map"} onClick={() => { setView("map"); setSelId(null); st.current.cam = mapHome(); }}>FIRE MAP</button>
+          <button aria-pressed={view === "index"} onClick={() => { setView("index"); setSelId(null); }}>INDEX</button>
         </nav>
       </header>
       {view === "index" && (() => {
@@ -707,8 +668,7 @@ export default function NetworkMap() {
       </aside>
       <aside id="dossier">
         {view === "map" && (() => {
-          const p = PROVS.find((x) => x.name === prov);
-          const go = (id: string) => { setView("net"); setProv(null); setSelId(id); };
+          const go = (id: string) => { setView("net"); setSelId(id); };
           const ranked = S.nodes.filter((n) => n.type === "Concession" && (n.spots || 0) > 0).sort((a, b) => (b.spots || 0) - (a.spots || 0)).slice(0, 8);
           const namedTable = (
             <div className="sec"><h4>NAMED HOTSPOTS · CONCESSIONS →</h4>
@@ -722,16 +682,16 @@ export default function NetworkMap() {
                   ))}
                 </tbody>
               </table>
-              <div className="prose" style={{ fontSize: 11 }}>Spots = haze source points 8 Aug–1 Oct 2026. Click row opens network.</div>
+              <div className="prose" style={{ fontSize: 11 }}>Dot positions: NASA FIRMS detections (top-FRP sample, one dot can repeat per pass). Counts + spots: Greenpeace. Click row opens network.</div>
             </div>
           );
-          if (!p) return (
+          return (
             <>
-              <div className="tiny">Fire Map · Greenpeace Aug–Oct 2026{live?.points.length ? ` · ● LIVE FIRMS ${live.date || ""}` : ""}</div>
+              <div className="tiny">Fire Map · Greenpeace Aug–Oct 2026{(feed === "live" && live?.points.length) ? ` · ● LIVE FIRMS ${live.date || ""}` : ""}</div>
               <h1>Who&apos;s profiting from the sawit haze?</h1>
-              <p className="prose">{live?.points.length ? `${live.points.length.toLocaleString()} live heat signals, latest FIRMS pass ${live.date || ""} (NASA VIIRS). Orange = very strong, yellow = strong.` : `${PROVS.reduce((a, pp) => a + spotsOf(pp, month), 0).toLocaleString()} haze source points in ${MONTH_LABEL[month]}.`} {IN_CONCESSION.toLocaleString()} inside oil-palm concessions (full season, Greenpeace). Click a province for detail.</p>
+              <p className="prose">{(feed === "live" && live?.points.length) ? `${live.points.length.toLocaleString()} live heat signals, latest FIRMS pass ${live.date || ""} (NASA VIIRS). Fires mostly out — rainy season. Switch to SEASON for the Aug–Oct inferno.` : `${PROVS.reduce((a, pp) => a + spotsOf(pp, month), 0).toLocaleString()} haze source points in ${MONTH_LABEL[month]}.`} {IN_CONCESSION.toLocaleString()} inside oil-palm concessions (full season, Greenpeace).</p>
               <div className="stat3">
-                <div><b>{live?.points.length ? live.points.length.toLocaleString() : "6,811"}</b><span className="tiny">{live?.points.length ? "SIGNALS LATEST PASS" : "SPOTS SEASON"}</span></div>
+                <div><b>{(feed === "live" && live?.points.length) ? live.points.length.toLocaleString() : "6,811"}</b><span className="tiny">{(feed === "live" && live?.points.length) ? "SIGNALS LATEST PASS" : "SPOTS SEASON"}</span></div>
                 <div><b>{S.edges.filter((e) => e.rel === "fire").length}</b><span className="tiny">CONCESSIONS HIT</span></div>
                 <div><b>{Math.round((IN_CONCESSION / SEASON_TOTAL) * 100)}%</b><span className="tiny">SPOTS IN CONCESSIONS</span></div>
               </div>
@@ -740,18 +700,8 @@ export default function NetworkMap() {
                 <div className="prose" style={{ fontSize: 12 }}>· Peak month September; El Niño drought turned drained peat to tinder. Fires peak July–October, worst in September.</div>
                 <div className="prose" style={{ fontSize: 12 }}>· The danger is the peat: drained for plantations it smoulders underground for months. Sumatra + Kalimantan hold the world&apos;s largest tropical peatlands.</div>
                 <div className="prose" style={{ fontSize: 12 }}>· Track record: 2,719 spots re-burned on 2015–2023 scars; 2015 burned ~2.6M ha; 2019 ~1.6M ha. 97–99% of burned peat never restored.</div>
-                <div className="prose" style={{ fontSize: 12 }}>· Season dots: Greenpeace haze sources. Live dots: NASA FIRMS VIIRS (very strong FRP ≥ 40). One fire gives several signals.</div>
+                <div className="prose" style={{ fontSize: 12 }}>· Dots (both feeds): NASA FIRMS VIIRS detections, sized by intensity. Counts: Greenpeace haze sources. One fire gives several signals.</div>
               </div>
-            </>
-          );
-          return (
-            <>
-              <div className="tiny">Fire Map · province · {MONTH_LABEL[month]}</div>
-              <h1>{p.name}</h1>
-              <div className="big" style={{ color: "#ff3b30" }}>{spotsOf(p, month).toLocaleString()}</div>
-              <p className="prose">haze source spots{month === "all" ? ", 8 Aug–1 Oct 2026" : month === "oct" ? ", 1 Oct 2026 (monitoring ends 1 Oct)" : " in " + MONTH_LABEL[month] + " 2026"}.</p>
-              <div className="kv"><dt>NOTE</dt><dd className="prose">{p.note}</dd></div>
-              {namedTable}
             </>
           );
         })()}
@@ -826,17 +776,21 @@ export default function NetworkMap() {
         )}
       </aside>
       <div id="ctrls">
-        <button onClick={() => { st.current.cam.z = Math.min(4, st.current.cam.z * 1.25); drawRef.current(); }}>+</button>
-        <button onClick={() => { st.current.cam.z = Math.max(0.3, st.current.cam.z * 0.8); drawRef.current(); }}>−</button>
-        <button onClick={() => { st.current.cam = { x: 0, y: 0, z: 1 }; setSelId(null); drawRef.current(); }}>⟲</button>
+        <button onClick={() => { st.current.cam.z = Math.min(4, st.current.cam.z * 1.25); if (view === "map") clampMapCam(innerWidth, innerHeight); drawRef.current(); }}>+</button>
+        <button onClick={() => { st.current.cam.z = Math.max(0.3, st.current.cam.z * 0.8); if (view === "map") clampMapCam(innerWidth, innerHeight); drawRef.current(); }}>−</button>
+        <button onClick={() => { st.current.cam = view === "map" ? mapHome() : { x: 0, y: 0, z: 1 }; setSelId(null); drawRef.current(); }}>⟲</button>
       </div>
       <div id="modes">
         {view === "map"
-          ? ((["all", "aug", "sep", "oct"] as Month[]).map((m) => (
-            <button key={m} aria-pressed={month === m} onClick={() => setMonth(m)}>
-              {MONTH_LABEL[m]}
-            </button>
-          )))
+          ? (<>
+            <button aria-pressed={feed === "season"} onClick={() => { setFeed("season"); setMonth("all"); }}>SEASON</button>
+            {(["all", "aug", "sep"] as Month[]).map((m) => (
+              <button key={m} aria-pressed={feed === "season" && month === m} disabled={feed !== "season"} onClick={() => setMonth(m)}>
+                {MONTH_LABEL[m]}
+              </button>
+            ))}
+            <button aria-pressed={feed === "live"} onClick={() => setFeed("live")}>● LIVE</button>
+          </>)
           : (MODES.map((m) => (
             <button key={m} data-m={m} aria-pressed={mode === m} onClick={() => setMode(m)}>
               {m.toUpperCase()}
@@ -845,11 +799,7 @@ export default function NetworkMap() {
       </div>
       <div id="crumbs">
         {view === "map"
-          ? (() => {
-            const tot = PROVS.reduce((a, p) => a + spotsOf(p, month), 0);
-            const pp = PROVS.find((p) => p.name === prov);
-            return prov && pp ? `${prov.toUpperCase()} · ${spotsOf(pp, month)} SPOTS · ${MONTH_LABEL[month]}` : `Fire Map · ${tot.toLocaleString()} SPOTS · ${MONTH_LABEL[month]} · ${PROVS.length} PROVINCES`;
-          })()
+          ? `Fire Map · ${PROVS.reduce((a, p) => a + spotsOf(p, month), 0).toLocaleString()} SPOTS · ${MONTH_LABEL[month]}`
           : (sel ? <><button onClick={() => setSelId(null)}>← ALL</button> {` ${sel.name} · ${sel.type}`}</>
             : `${S.nodes.filter(visible).length} ENTITIES · ${S.edges.filter(visibleE).length} LINKS`)}
       </div>

@@ -50,6 +50,7 @@ nav.top button:hover{color:var(--fg)}
 .mx th.r,.mx td.r{text-align:right}
 .mx td.co{max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .mx tbody tr:hover td{color:var(--signal)}
+#modes button:disabled{opacity:.28;cursor:default}
 .idx #rail,.idx #dossier,.idx #ctrls,.idx #modes,.idx #crumbs{display:none}
 #index{position:absolute;inset:64px 0 0 0;overflow:auto;padding:8px 26px 80px}
 #index .tiny{display:block;margin-bottom:10px}
