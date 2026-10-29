@@ -136,7 +136,7 @@ export default function NetworkMap() {
   const [typeOff, setTypeOff] = useState<Set<string>>(new Set());
   const [linkOff, setLinkOff] = useState<Set<string>>(new Set());
   const [query, setQuery] = useState("");
-  const [view, setView] = useState<"net" | "map">("net");
+  const [view, setView] = useState<"net" | "map" | "index">("net");
   const [prov, setProv] = useState<string | null>(null);
   const [geo, setGeo] = useState<Faces | null>(null);
   const [month, setMonth] = useState<Month>("all");
@@ -226,6 +226,12 @@ export default function NetworkMap() {
     if (!ctx) return;
     let raf = 0; let dead = false;
     const sel = st.current.nodes.find((n) => n.id === selId) || null;
+    // neighbor set built once per selection, not per node per frame
+    const selNb = new Set<Node>();
+    if (sel) for (const e of st.current.edges) {
+      if (!visibleE(e)) continue;
+      if (e.a === sel) selNb.add(e.b); else if (e.b === sel) selNb.add(e.a);
+    }
     const draw = () => {
       const dpr = devicePixelRatio || 1;
       const w = innerWidth, h = innerHeight;
@@ -269,7 +275,7 @@ export default function NetworkMap() {
         const sx = sc[0], sy = sc[1];
         if (sx < -50 || sy < -50 || sx > w + 50 || sy > h + 50) continue;
         const r = nodeR(n);
-        const dim = sel !== null && sel !== n && !S.edges.some((e) => visibleE(e) && ((e.a === sel && e.b === n) || (e.b === sel && e.a === n)));
+        const dim = sel !== null && sel !== n && !selNb.has(n);
         ctx.globalAlpha = dim ? 0.22 : 1;
         const isSel = sel !== null && n === sel;
         if (isSel) {
@@ -381,6 +387,7 @@ export default function NetworkMap() {
               ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
               ctx.restore();
             } else {
+              // SAFETY: "#d" keys are only ever set with the canvas built below; Map type just can't express mixed values.
               const dark = tileCache.current.get(key + "#d") as unknown as HTMLCanvasElement | undefined;
               if (dark) {
                 ctx.drawImage(dark, tax, tay, tbx - tax, tby - tay);
@@ -399,6 +406,7 @@ export default function NetworkMap() {
                     px[i] = g; px[i + 1] = g; px[i + 2] = g;
                   }
                   octx.putImageData(id, 0, 0);
+                  // SAFETY: canvas stored under "#d" key, read back only as canvas (see above).
                   tileCache.current.set(key + "#d", off as unknown as HTMLImageElement);
                 } catch { /* tainted canvas: draw raw below */ }
                 ctx.drawImage(img, tax, tay, tbx - tax, tby - tay);
@@ -530,19 +538,24 @@ export default function NetworkMap() {
           e.a.vx += (dx / d) * pull; e.a.vy += (dy / d) * pull;
           e.b.vx -= (dx / d) * pull; e.b.vy -= (dy / d) * pull;
         }
+        let maxSp = 0;
         for (const n of S.nodes) {
           n.vx *= 0.86; n.vy *= 0.86;
           const sp = Math.hypot(n.vx, n.vy);
+          if (sp > maxSp) maxSp = sp;
           if (sp > 40) { n.vx = (n.vx / sp) * 40; n.vy = (n.vy / sp) * 40; }
           n.x = Math.max(-1600, Math.min(1600, n.x + n.vx));
           n.y = Math.max(-1600, Math.min(1600, n.y + n.vy));
         }
+        // settled: stop the O(n^2) sim early instead of burning all 600 ticks
+        if (S.ticks > 30 && maxSp < 0.05) S.sim = false;
         draw(); raf = requestAnimationFrame(step);
         return;
       }
       draw(); raf = requestAnimationFrame(step);
     };
     if (view === "map") { drawRef.current = drawMap; drawMap(); const onR = () => drawMap(); addEventListener("resize", onR); return () => { dead = true; removeEventListener("resize", onR); }; }
+    if (view === "index") { drawRef.current = () => {}; return () => { dead = true; }; }
     step();
     const onR = () => draw();
     addEventListener("resize", onR);
@@ -624,8 +637,8 @@ export default function NetworkMap() {
   };
 
   return (
-    <div id="app">
-      <canvas id="net" ref={cvRef} />
+    <div id="app" className={view === "index" ? "idx" : ""}>
+      {view !== "index" && <canvas id="net" ref={cvRef} />}
       <header>
         <div className="mark"><b>SAWIT-HAZE<i>.MONEY</i></b><span>THE SAWIT HAZE, MAPPED</span></div>
         <div className="searchwrap">
@@ -644,8 +657,35 @@ export default function NetworkMap() {
         <nav className="top">
           <button aria-pressed={view === "net"} onClick={() => { setView("net"); setProv(null); }}>NETWORK</button>
           <button aria-pressed={view === "map"} onClick={() => { setView("map"); setSelId(null); }}>FIRE MAP</button>
+          <button aria-pressed={view === "index"} onClick={() => { setView("index"); setSelId(null); setProv(null); }}>INDEX</button>
         </nav>
       </header>
+      {view === "index" && (() => {
+        const deg = new Map<string, number>();
+        for (const e of S.edges) { deg.set(e.a.id, (deg.get(e.a.id) || 0) + 1); deg.set(e.b.id, (deg.get(e.b.id) || 0) + 1); }
+        const rows = S.nodes.filter((n) => !typeOff.has(n.type)).sort((a, b) => (deg.get(b.id) || 0) - (deg.get(a.id) || 0));
+        return (
+          <main id="index">
+            <div className="tiny">{rows.length} RECORDS · SORTED BY CONNECTIONS · CLICK A ROW TO OPEN IT ON THE MAP</div>
+            <table className="mx big">
+              <thead><tr><th>#</th><th>Type</th><th>Entity</th><th className="mono">ID</th><th>Country</th><th className="r">Spots</th><th className="r">Links ↓</th></tr></thead>
+              <tbody>
+                {rows.map((n, i) => (
+                  <tr key={n.id} onClick={() => { setView("net"); setSelId(n.id); }}>
+                    <td className="mono dim">{i + 1}</td>
+                    <td className="nowrap"><span style={{ color: n.color }}>●</span> {n.type}</td>
+                    <td className="co">{n.name}</td>
+                    <td className="mono dim">{n.id}</td>
+                    <td className="mono">{n.country || "—"}</td>
+                    <td className="r mono">{n.spots ?? "—"}</td>
+                    <td className="r mono">{deg.get(n.id) || 0}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </main>
+        );
+      })()}
       <aside id="rail">
         <div><h3>ENTITY TYPE</h3><div id="types">
           {types.map((t) => (
