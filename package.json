@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "bake": "node scripts/bake-layout.mjs"
+    "bake": "node scripts/bake-layout.mjs",
+    "bake:season": "node scripts/bake-season.mjs"
   },
   "dependencies": {
     "next": "^15.1.0",
