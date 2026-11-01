@@ -34,6 +34,7 @@ nav.top button:hover{color:var(--fg)}
 #dossier h1{font-weight:400;font-size:clamp(26px,3vw,38px);line-height:1.02;margin:10px 0 12px}
 .prose{font-size:13.5px;line-height:1.55;color:#d8d8d3}
 .sec{border-top:1px solid var(--rule);padding:12px 0 6px} .sec h4{margin:0 0 10px;font-family:var(--mono);font-weight:400;font-size:10px;letter-spacing:.12em;color:var(--fg3)}
+a.rel{color:var(--fg);text-decoration:none}
 .rel{display:grid;grid-template-columns:14px 1fr auto;gap:2px 8px;width:100%;text-align:left;padding:7px 0;border-bottom:1px solid #141413;font-size:12.5px}
 .rel:hover .who{color:var(--signal)} .rel .what{grid-column:2/4;font-family:var(--mono);font-size:10px;color:var(--fg3);text-transform:uppercase;letter-spacing:.06em}
 .kv{display:grid;grid-template-columns:96px 1fr;gap:6px 12px;font-size:12.5px;padding:10px 0;border-top:1px solid var(--rule)}
@@ -41,6 +42,7 @@ nav.top button:hover{color:var(--fg)}
 .big{font-size:40px;font-weight:300;line-height:1}
 .stat3{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:8px 0 10px}
 .stat3 b{display:block;font-weight:300;font-size:30px;font-variant-numeric:tabular-nums}
+.stat3 b.clip{font-size:15px;line-height:1.2;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .stat3 .tiny{display:block;margin-top:2px}
 .tbar{display:flex;height:10px;gap:2px;margin:10px 0 8px}
 .tbar span{display:block;min-width:3px}

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
-type Entity = { id: string; name: string; type: string; role?: string; country?: string; profile?: string; x?: number; y?: number; spots?: number; days?: number };
+type Entity = { id: string; name: string; type: string; role?: string; country?: string; profile?: string; x?: number; y?: number; spots?: number; days?: number; usd?: number; srcs?: string[] };
 type LiveFeed = { date: string | null; points: { lat: number; lng: number; frp: number }[] };
 type Rel = { a: string; b: string; rel: string; ctx?: string };
 type Data = { entities: Entity[]; rels: Rel[]; sources?: { id: string; title: string; pub: string; url: string }[]; built?: string; tracked?: { usd: number; parts?: { label: string; usd: number }[] } };
@@ -745,15 +745,40 @@ export default function NetworkMap() {
             </>
           );
         })()}
-        {view === "net" && sel && (
+        {view === "net" && sel && (() => {
+          const srcList = (sel.srcs || []).map((id) => (data?.sources || []).find((s) => s.id === id)).filter(Boolean) as { id: string; title: string; pub: string; url: string }[];
+          if (!srcList.length) {
+            if (selRels.some((e) => e.rel === "fire")) srcList.push(...(data?.sources || []).filter((s) => s.id === "SRC-GP-PRESS" || s.id === "SRC-GP-PDF"));
+            if (selRels.some((e) => e.rel === "notice")) srcList.push(...(data?.sources || []).filter((s) => s.id === "SRC-NEA"));
+          }
+          const byType = new Map<string, number>();
+          for (const e of selRels) { const o = e.a === sel ? e.b : e.a; byType.set(o.type, (byType.get(o.type) || 0) + 1); }
+          return (
           <>
             <div style={{ display: "flex", justifyContent: "space-between" }}>
-              <span className="tiny" style={{ color: sel.color }}>● {sel.type}{sel.country ? ` · ${sel.country}` : ""}</span>
+              <span className="tiny" style={{ color: sel.color }}>● ENTITY FILE · {sel.type.toUpperCase()}</span>
               <button className="closebtn" onClick={() => setSelId(null)}>CLOSE ✕</button>
             </div>
             <h1>{sel.name}</h1>
-            <p className="prose">{sel.role}</p>
+            {typeof sel.usd === "number" ? (<><div className="big" style={{ color: "var(--signal)" }}>{money(sel.usd)}</div><div className="tiny">FY24 GROUP TURNOVER</div></>) : null}
+            {sel.type === "Concession" && typeof sel.spots === "number" ? (<><div className="big" style={{ color: "#ff3b30" }}>{sel.spots.toLocaleString()}</div><div className="tiny">HAZE SOURCE SPOTS · {typeof sel.days === "number" ? `${sel.days} DAYS` : "AUG–SEP 2026"}</div></>) : null}
+            <div className="stat3" style={{ margin: "10px 0" }}>
+              <div><b className="clip">{sel.role || sel.type}</b><span className="tiny">ROLE</span></div>
+              <div><b>{sel.country || "—"}</b><span className="tiny">COUNTRY</span></div>
+              <div><b>{selRels.length}</b><span className="tiny">LINKS</span></div>
+            </div>
+            {byType.size > 0 ? <div className="prose" style={{ fontSize: 11 }}>{[...byType.entries()].map(([t, n]) => `${n} ${t.toUpperCase()}`).join(" · ")}</div> : null}
             <div className="kv"><dt>PROFILE</dt><dd className="prose">{sel.profile || "—"}</dd></div>
+            {srcList.length > 0 ? (
+              <div className="sec"><h4>SOURCES · {srcList.length}</h4>
+                {srcList.map((s) => (
+                  <a key={s.id} className="rel" href={s.url} target="_blank" rel="noreferrer">
+                    <span style={{ color: "var(--signal)" }}>▸</span><span className="who">{s.title}</span>
+                    <span className="what">{s.pub}</span>
+                  </a>
+                ))}
+              </div>
+            ) : null}
             {["owns", "supplies", "funds", "concession", "fire", "notice", "opposes", "role"].map((g) => {
               const grp = selRels.filter((e) => e.rel === g);
               if (!grp.length) return null;
@@ -773,7 +798,8 @@ export default function NetworkMap() {
               );
             })}
           </>
-        )}
+          );
+        })()}
       </aside>
       <div id="ctrls">
         <button onClick={() => { st.current.cam.z = Math.min(4, st.current.cam.z * 1.25); if (view === "map") clampMapCam(innerWidth, innerHeight); drawRef.current(); }}>+</button>
